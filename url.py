@@ -3,9 +3,17 @@ import ssl
 import os
 import PyPDF2
 import io
+import time
+from collections import namedtuple
 
 # Global cache to store open sockets for reuse
 socket_cache = {}
+
+# Cache entry structure
+CacheEntry = namedtuple('CacheEntry', ['content', 'headers', 'timestamp', 'expires'])
+
+# Global cache for HTTP responses
+http_cache = {}
 
 class URL:
     def __init__(self, url):
@@ -143,6 +151,20 @@ class URL:
             except Exception as e:
                 return f"<html><body><h1>Error</h1><p>An error occurred: {str(e)}</p></body></html>"
         
+        # Check if we have this response cached (only for GET requests to http/https URLs)
+        cache_key = f"{self.scheme}://{self.host}:{self.port}{self.path}"
+        if cache_key in http_cache:
+            cache_entry = http_cache[cache_key]
+            current_time = time.time()
+            
+            # Check if the cache entry is still valid
+            if cache_entry.expires > current_time:
+                print(f"Using cached response for {cache_key}")
+                return cache_entry.content
+            else:
+                # Cache entry expired, remove it
+                del http_cache[cache_key]
+        
         # HTTP/HTTPS handling
         socket_key = f"{self.scheme}://{self.host}:{self.port}"
         
@@ -277,6 +299,49 @@ class URL:
             content = response.read()
             s.close()
 
+        # Handle caching for successful GET responses (status code 200)
+        if self.scheme in ["http", "https"] and status == 200:
+            # Check Cache-Control header to determine if we should cache
+            should_cache = True
+            max_age = 3600  # Default cache time: 1 hour
+            
+            if "cache-control" in response_headers:
+                cache_control = response_headers["cache-control"]
+                
+                # Don't cache if no-store is specified
+                if "no-store" in cache_control:
+                    should_cache = False
+                
+                # Set max-age if specified
+                if "max-age=" in cache_control:
+                    try:
+                        max_age_part = [p for p in cache_control.split(',') if "max-age=" in p][0]
+                        max_age = int(max_age_part.split('=')[1].strip())
+                    except (ValueError, IndexError):
+                        # If we can't parse max-age, use default
+                        max_age = 3600
+                
+                # Don't cache if there are other Cache-Control directives we don't understand
+                unknown_directives = ["private", "no-cache", "must-revalidate", "proxy-revalidate", 
+                                    "s-maxage=", "public", "immutable", "stale-while-revalidate", 
+                                    "stale-if-error"]
+                for directive in unknown_directives:
+                    if directive in cache_control:
+                        should_cache = False
+                        break
+            
+            # Cache the response if appropriate
+            if should_cache:
+                cache_key = f"{self.scheme}://{self.host}:{self.port}{self.path}"
+                expires = time.time() + max_age
+                http_cache[cache_key] = CacheEntry(
+                    content=content,
+                    headers=response_headers,
+                    timestamp=time.time(),
+                    expires=expires
+                )
+                print(f"Cached response for {cache_key} (expires in {max_age} seconds)")
+        
         return content
 
 
