@@ -202,6 +202,7 @@ class URL:
 
         statusline = response.readline()
         version, status, explanation = statusline.split(" ", 2)
+        status = int(status)
 
         response_headers = {}
         while True:
@@ -210,6 +211,44 @@ class URL:
             header, value = line.split(":", 1)
             response_headers[header.casefold()] = value.strip()
 
+        # Handle redirects (status codes 301, 302, 303, 307, 308)
+        if 300 <= status < 400 and status != 304:
+            if "location" in response_headers:
+                # Get the redirect URL
+                redirect_url = response_headers["location"]
+                
+                # Read and discard the body to free the socket
+                if "content-length" in response_headers:
+                    content_length = int(response_headers["content-length"])
+                    bytes_read = 0
+                    while bytes_read < content_length:
+                        chunk_size = min(4096, content_length - bytes_read)
+                        chunk = response.read(chunk_size)
+                        if not chunk:
+                            break
+                        bytes_read += len(chunk)
+                
+                # Handle relative URLs in Location header
+                if redirect_url.startswith('/'):
+                    # Relative URL, combine with current host and scheme
+                    redirect_url = f"{self.scheme}://{self.host}{redirect_url}"
+                elif not (redirect_url.startswith('http://') or 
+                          redirect_url.startswith('https://') or
+                          redirect_url.startswith('file://') or
+                          redirect_url.startswith('data:')):
+                    # URL without scheme, assume it's relative to the current path
+                    base_path = '/'.join(self.path.split('/')[:-1]) + '/'
+                    redirect_url = f"{self.scheme}://{self.host}{base_path}{redirect_url}"
+                
+                # Store socket for possible reuse if needed
+                connection_header = response_headers.get("connection", "").lower()
+                if connection_header != "close" and s:
+                    socket_key = f"{self.scheme}://{self.host}:{self.port}"
+                    socket_cache[socket_key] = s
+                
+                # Return a special signal to indicate redirection
+                return ("redirect", redirect_url)
+            
         assert "transfer-encoding" not in response_headers
         assert "content-encoding" not in response_headers
 
@@ -282,14 +321,36 @@ def show(body):
         i += 1
 
 
-def load(url):
-    body = url.request()
+def load(url, redirect_count=0, original_view_source=None):
+    # Remember the view-source setting from the original URL
+    if redirect_count == 0:
+        original_view_source = url.view_source
+    elif original_view_source is not None:
+        # Apply the original view-source setting to redirected URLs
+        url.view_source = original_view_source
     
-    # If view-source is enabled, print the raw HTML without rendering
-    if url.view_source:
-        print(body)
+    # Prevent redirect loops with a maximum number of redirects
+    max_redirects = 10
+    if redirect_count > max_redirects:
+        print(f"Error: Too many redirects (maximum: {max_redirects})")
+        return
+        
+    # Make the request
+    result = url.request()
+    
+    # Check if this is a redirect response
+    if isinstance(result, tuple) and len(result) == 2 and result[0] == "redirect":
+        redirect_url = result[1]
+        print(f"Redirecting to: {redirect_url}")
+        # Handle the redirect by loading the new URL
+        load(URL(redirect_url), redirect_count + 1, original_view_source)
     else:
-        show(body)
+        # Regular response, show the content
+        body = result
+        if url.view_source:
+            print(body)
+        else:
+            show(body)
 
 if __name__ == "__main__":
     import sys
