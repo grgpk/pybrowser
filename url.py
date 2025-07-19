@@ -6,13 +6,26 @@ import io
 
 class URL:
     def __init__(self, url):
-        self.scheme, url = url.split("://", 1)
-        assert self.scheme in ["http", "https", "file"]
+        if "://" in url:
+            self.scheme, url = url.split("://", 1)
+        else:
+            # Handle special case for data URLs which use data:
+            if url.startswith("data:"):
+                self.scheme = "data"
+                url = url[5:]  # Remove "data:" prefix
+            else:
+                raise ValueError("Invalid URL format")
+                
+        assert self.scheme in ["http", "https", "file", "data"]
 
         if self.scheme == "http":
             self.port = 80
         elif self.scheme == "https":
             self.port = 443
+        elif self.scheme == "data":
+            # For data URLs, we store the entire data part in the path
+            self.path = url
+            return
         # For file:// URLs, we don't need port information
 
 
@@ -68,8 +81,44 @@ class URL:
             return f"<html><body><h1>Error Reading PDF</h1><p>{str(e)}</p></body></html>"
 
     def request(self):
+        # Handle data: URLs
+        if self.scheme == "data":
+            try:
+                # Parse data URL format
+                if ',' not in self.path:
+                    return "<html><body><h1>Error</h1><p>Invalid data URL format</p></body></html>"
+                
+                media_type_and_data = self.path.split(',', 1)
+                media_type = media_type_and_data[0]
+                data = media_type_and_data[1]
+                
+                # Handle base64 encoding
+                is_base64 = False
+                if ';base64' in media_type:
+                    is_base64 = True
+                    media_type = media_type.replace(';base64', '')
+                
+                # If no media type is specified, default to text/plain
+                if not media_type:
+                    media_type = 'text/plain'
+                
+                # For now, we'll just return the decoded content
+                if is_base64:
+                    import base64
+                    try:
+                        decoded_data = base64.b64decode(data).decode('utf-8')
+                        return decoded_data
+                    except:
+                        return "<html><body><h1>Error</h1><p>Invalid base64 encoding</p></body></html>"
+                else:
+                    # Handle URL encoding
+                    import urllib.parse
+                    return urllib.parse.unquote(data)
+            except Exception as e:
+                return f"<html><body><h1>Error</h1><p>Error processing data URL: {str(e)}</p></body></html>"
+                
         # Handle file:// URLs differently
-        if self.scheme == "file":
+        elif self.scheme == "file":
             try:
                 # Check if the file is a PDF
                 if self.path.lower().endswith('.pdf'):
