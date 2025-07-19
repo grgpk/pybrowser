@@ -6,6 +6,12 @@ import io
 
 class URL:
     def __init__(self, url):
+        # Handle view-source scheme
+        self.view_source = False
+        if url.startswith("view-source:"):
+            self.view_source = True
+            url = url[len("view-source:"):]
+        
         if "://" in url:
             self.scheme, url = url.split("://", 1)
         else:
@@ -228,7 +234,12 @@ def show(body):
 
 def load(url):
     body = url.request()
-    show(body)
+    
+    # If view-source is enabled, print the raw HTML without rendering
+    if url.view_source:
+        print(body)
+    else:
+        show(body)
 
 if __name__ == "__main__":
     import sys
