@@ -4,6 +4,9 @@ import os
 import PyPDF2
 import io
 
+# Global cache to store open sockets for reuse
+socket_cache = {}
+
 class URL:
     def __init__(self, url):
         # Handle view-source scheme
@@ -141,22 +144,47 @@ class URL:
                 return f"<html><body><h1>Error</h1><p>An error occurred: {str(e)}</p></body></html>"
         
         # HTTP/HTTPS handling
-        s = socket.socket(
-            family=socket.AF_INET,
-            type=socket.SOCK_STREAM,
-            proto=socket.IPPROTO_TCP
-        )
-
-        s.connect((self.host, self.port))
-
-        if self.scheme == "https":
-            ctx = ssl.create_default_context()
-            s = ctx.wrap_socket(s, server_hostname=self.host)
+        socket_key = f"{self.scheme}://{self.host}:{self.port}"
+        
+        # Check if we have a cached socket for this host
+        if socket_key in socket_cache:
+            try:
+                # Try to reuse the cached socket
+                s = socket_cache[socket_key]
+                # Test if the socket is still usable
+                s.settimeout(0.1)
+                s.getpeername()  # Will raise an exception if socket is closed
+                s.settimeout(None)  # Reset timeout
+                # If we get here, the socket is still valid
+                # Remove from cache since we're using it
+                del socket_cache[socket_key]
+            except (OSError, socket.error):
+                # Socket is no longer usable
+                try:
+                    s.close()
+                except:
+                    pass  # Ignore close errors
+                # Create a new socket below
+                s = None
+        else:
+            s = None
+            
+        # If we don't have a valid socket, create a new one
+        if not s:
+            s = socket.socket(
+                family=socket.AF_INET,
+                type=socket.SOCK_STREAM,
+                proto=socket.IPPROTO_TCP
+            )
+            s.connect((self.host, self.port))
+            
+            if self.scheme == "https":
+                ctx = ssl.create_default_context()
+                s = ctx.wrap_socket(s, server_hostname=self.host)
 
         # Define headers in a dictionary for easy addition of new headers
         request_headers = {
             "Host": self.host,
-            "Connection": "close",
             "User-Agent": "PyBrowser/1.0"
         }
         
@@ -185,8 +213,30 @@ class URL:
         assert "transfer-encoding" not in response_headers
         assert "content-encoding" not in response_headers
 
-        content = response.read()
-        s.close()
+        # Read only as many bytes as specified by Content-Length
+        content = ""
+        if "content-length" in response_headers:
+            content_length = int(response_headers["content-length"])
+            content = ""
+            bytes_read = 0
+            
+            # Read exactly content_length bytes
+            while bytes_read < content_length:
+                chunk = response.read(min(4096, content_length - bytes_read))
+                if not chunk:
+                    break  # Connection closed prematurely
+                bytes_read += len(chunk)
+                content += chunk
+                
+            # Store the socket in the cache for future use
+            connection_header = response_headers.get("connection", "").lower()
+            if connection_header != "close" and s:
+                socket_key = f"{self.scheme}://{self.host}:{self.port}"
+                socket_cache[socket_key] = s
+        else:
+            # If no Content-Length header, fallback to reading everything and close
+            content = response.read()
+            s.close()
 
         return content
 
